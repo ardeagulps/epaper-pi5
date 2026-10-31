@@ -7,7 +7,7 @@ use rtnetlink::{Handle, MulticastGroup};
 use std::collections::{BTreeSet, VecDeque};
 use std::ffi::OsString;
 use std::io::Error;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, UdpSocket};
 use std::path::Path;
 use std::time::Duration;
 use tokio::sync::{mpsc, watch};
@@ -22,6 +22,7 @@ const MESSAGE_CAPACITY: usize = 64;
 const SERVICE_UNIT: &str = "offline-update.service";
 const ETHERNET_IF: &str = "eth0";
 const ETHERNET_HOST: Ipv4Addr = Ipv4Addr::new(192, 168, 225, 12);
+const DISCARD_PORT: u16 = 9;
 const ETHERNET_DESTINATION: NeighbourAttribute =
     NeighbourAttribute::Destination(NeighbourAddress::Inet(ETHERNET_HOST));
 const NETLINK_GROUPS: [MulticastGroup; 2] = [MulticastGroup::Link, MulticastGroup::Neigh];
@@ -210,7 +211,9 @@ async fn handle_model_updates(
         };
         let (next, command) = update::update(message, model);
         if let Some(command) = command {
-            follow_ups.push_back(perform(command).await);
+            if let Some(message) = perform(command).await {
+                follow_ups.push_back(message);
+            }
         }
         let frame = view::view(&next);
         view_tx.send_if_modified(|current| {
@@ -221,10 +224,16 @@ async fn handle_model_updates(
     }
 }
 
-/// Executes a command requested by update and returns the message describing its result.
-async fn perform(command: Command) -> Message {
+/// Executes a command requested by update and returns the follow-up message, if its result needs one.
+async fn perform(command: Command) -> Option<Message> {
     match command {
-        Command::ReadReport => Message::ReportLoaded(read_report().await),
+        Command::ReadReport => Some(Message::ReportLoaded(read_report().await)),
+        Command::SendArpRequest => {
+            if let Err(error) = send_arp_request() {
+                eprintln!("ARP request failed due to {error}");
+            }
+            None
+        }
     }
 }
 
@@ -330,6 +339,14 @@ async fn ethernet_state(handle: &Handle) -> Option<(LinkFlags, NeighbourState)> 
             None
         }
     }
+}
+
+/// Makes the kernel ARP for `ETHERNET_HOST`: an unresolved neighbour triggers a broadcast ARP request when a packet is sent to it.
+fn send_arp_request() -> Result<(), Error> {
+    let socket = UdpSocket::bind("0.0.0.0:0")?;
+    socket.connect((ETHERNET_HOST, DISCARD_PORT))?;
+    socket.send(&[0])?;
+    Ok(())
 }
 
 #[zbus::proxy(

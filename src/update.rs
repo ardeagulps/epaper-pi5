@@ -21,6 +21,7 @@ pub enum Message {
 #[derive(Debug)]
 pub enum Command {
     ReadReport,
+    SendArpRequest,
 }
 
 pub fn update(message: Message, mut model: Model) -> (Model, Option<Command>) {
@@ -35,9 +36,11 @@ pub fn update(message: Message, mut model: Model) -> (Model, Option<Command>) {
             None
         }
         Message::EthernetChanged(flags, arp) => {
+            let became_unresolved = model.ethernet_arp != arp
+                && matches!(arp, NeighbourState::None | NeighbourState::Failed);
             model.ethernet_link_up = flags.contains(LinkFlags::LowerUp);
             model.ethernet_arp = arp;
-            None
+            became_unresolved.then_some(Command::SendArpRequest)
         }
     };
     (model, command)
@@ -90,6 +93,32 @@ mod tests {
         );
         assert!(model.ethernet_link_up);
         assert_eq!(model.ethernet_arp, NeighbourState::Reachable);
+    }
+
+    #[test]
+    fn neighbour_becoming_unresolved_requests_arp_request() {
+        for state in [NeighbourState::None, NeighbourState::Failed] {
+            let (_, command) = update(
+                Message::EthernetChanged(LinkFlags::LowerUp, state),
+                Model {
+                    ethernet_arp: NeighbourState::Reachable,
+                    ..Model::default()
+                },
+            );
+            assert!(matches!(command, Some(Command::SendArpRequest)));
+        }
+    }
+
+    #[test]
+    fn neighbour_staying_unresolved_does_not_request_arp_request() {
+        let (_, command) = update(
+            Message::EthernetChanged(LinkFlags::LowerUp, NeighbourState::Failed),
+            Model {
+                ethernet_arp: NeighbourState::Failed,
+                ..Model::default()
+            },
+        );
+        assert!(command.is_none());
     }
 
     #[test]
