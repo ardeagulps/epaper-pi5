@@ -47,10 +47,18 @@ const MESSAGE_CHARS: usize =
 const MESSAGE_LEFT: i32 = ID_RIGHT + FONT_6X10.character_size.width as i32;
 const UNAVAILABLE: &str = "---";
 
+/// Clockwise rotation of the landscape layout when mounted on the portrait panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rotation {
+    #[allow(dead_code)]
+    Deg90,
+    Deg270,
+}
+
 /// Renders the model into a frame. Pure: the frame depends only on the model.
 pub fn view(model: &Model) -> Vec<u8> {
     let mut frame = vec![0xFFu8; FRAME_LEN];
-    let mut canvas = Canvas { frame: &mut frame };
+    let mut canvas = Canvas::new(&mut frame);
     draw_frame(model, &mut canvas).expect("drawing to an in-memory canvas cannot fail");
     frame
 }
@@ -260,8 +268,26 @@ fn wrap(text: &str, max_chars: usize) -> impl Iterator<Item = &str> {
     })
 }
 
+/// Maps a landscape pixel to its (bit column, row) on the portrait panel.
+fn panel_position(rotation: Rotation, x: usize, y: usize) -> (usize, usize) {
+    match rotation {
+        Rotation::Deg90 => ((HEIGHT as usize - 1) - y, x),
+        Rotation::Deg270 => (y, (WIDTH as usize - 1) - x),
+    }
+}
+
 struct Canvas<'a> {
     frame: &'a mut [u8],
+    rotation: Rotation,
+}
+
+impl<'a> Canvas<'a> {
+    fn new(frame: &'a mut [u8]) -> Self {
+        Self {
+            frame,
+            rotation: Rotation::Deg270,
+        }
+    }
 }
 
 impl OriginDimensions for Canvas<'_> {
@@ -274,7 +300,6 @@ impl DrawTarget for Canvas<'_> {
     type Color = BinaryColor;
     type Error = Infallible;
 
-    // Landscape (x, y) maps to portrait (127 - y, x), matching a 90 degree clockwise rotation.
     fn draw_iter<I>(&mut self, pixels: I) -> std::result::Result<(), Infallible>
     where
         I: IntoIterator<Item = Pixel<BinaryColor>>,
@@ -283,8 +308,7 @@ impl DrawTarget for Canvas<'_> {
             if x < 0 || y < 0 || x >= WIDTH || y >= HEIGHT {
                 continue;
             }
-            let px = (HEIGHT as usize - 1) - y as usize;
-            let py = x as usize;
+            let (px, py) = panel_position(self.rotation, x as usize, y as usize);
             let idx = py * WIDTH_BYTES + px / 8;
             let bit = 0x80 >> (px % 8);
             match color {
@@ -344,14 +368,13 @@ mod tests {
 
     /// Renders the landscape frame as a PBM (P4) bitmap, 1 bit per pixel, MSB first, 1 = black.
     /// Inverts the mapping in `Canvas`.
-    fn frame_to_pbm(frame: &[u8]) -> Vec<u8> {
+    fn frame_to_pbm(frame: &[u8], rotation: Rotation) -> Vec<u8> {
         let row_bytes = (WIDTH as usize).div_ceil(8);
         let mut pbm = format!("P4\n{WIDTH} {HEIGHT}\n").into_bytes();
         for y in 0..HEIGHT as usize {
             let mut row = vec![0u8; row_bytes];
             for x in 0..WIDTH as usize {
-                let px = (HEIGHT as usize - 1) - y;
-                let py = x;
+                let (px, py) = panel_position(rotation, x, y);
                 let on = frame[py * WIDTH_BYTES + px / 8] & (0x80 >> (px % 8)) == 0;
                 if on {
                     row[x / 8] |= 0x80 >> (x % 8);
@@ -364,7 +387,24 @@ mod tests {
 
     #[test]
     fn view_matches_snapshot() {
-        let pbm = frame_to_pbm(&view(&sample_model()));
+        let pbm = frame_to_pbm(&view(&sample_model()), Rotation::Deg270);
         assert_eq!(EXPECTED, &pbm, "frame differs from view.pbm");
+    }
+
+    #[test]
+    fn deg270_is_deg90_turned_half_circle() {
+        let (w, h) = (WIDTH as usize, HEIGHT as usize);
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1), (37, 91)] {
+            assert_eq!(
+                panel_position(Rotation::Deg270, x, y),
+                panel_position(Rotation::Deg90, w - 1 - x, h - 1 - y),
+            );
+        }
+    }
+
+    #[test]
+    fn deg270_rotates_counter_clockwise() {
+        let top_left = panel_position(Rotation::Deg270, 0, 0);
+        assert_eq!(top_left, (0, WIDTH as usize - 1));
     }
 }
